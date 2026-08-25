@@ -1,0 +1,15 @@
+{
+  "technique": "geowedge_cpp_LI-Small",
+  "config": {
+    "min_in_sum": 10000.0,
+    "ratio_high": 0.2,
+    "window_days": 0.1,
+    "max_candidates": 0
+  },
+  "done": true,
+  "rows_processed": 100000,
+  "rows_total": 100000,
+  "positive_query_answers": 1783,
+  "total_wallclock_seconds": 1.802161455154419,
+  "mean_per_tx_ms": 0.01802161455154419
+}
