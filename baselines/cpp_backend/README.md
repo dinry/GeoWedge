@@ -3,11 +3,11 @@
 This directory contains the C++17 pybind11 implementation of the lightweight
 baseline decision routines:
 
-- `detect_topk_value`
-- `detect_topk_ratio`
-- `detect_greedy_value`
-- `detect_greedy_ratio`
-- `detect_greedy_fill`
+- `query_topk_value`
+- `query_topk_ratio`
+- `query_greedy_value`
+- `query_greedy_ratio`
+- `query_greedy_fill`
 
 Build:
 

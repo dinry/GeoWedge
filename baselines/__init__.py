@@ -1,1 +1,1 @@
-"""Reviewer-facing baseline implementations."""
+"""Baseline implementations."""

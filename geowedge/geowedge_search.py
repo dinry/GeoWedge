@@ -14,12 +14,12 @@ Compared with the basic frontier routines, this module adds:
 
   * Both conditions are MATHEMATICALLY SAFE — a state dropped here has no
     valid descendant, so the 0/1 output is bit-for-bit identical to the
-    un-pruned version (no change to recall_vs_label, recall_vs_enum, etc.).
+    un-pruned version (no change to any query answer).
 
 When this helps:
-  Pathological survivors that pass Stage 1's mass filter but cannot actually
+  Pathological survivors that pass the P1-P5 property filter but cannot actually
   balance — e.g. "hot account residue" where account mass crosses theta but
-  the residue is too one-sided to find an IIO subset. In that regime,
+  the residue is too one-sided to form a feasible package pair. In that regime,
   un-pruned enum exhaustively walks 2^16 ≈ 65 K states per survivor,
   observed as ~200 ms / survivor (≈ 5 / s).
 
@@ -42,10 +42,10 @@ from state_search import (
 # --------------------------------------------------------------------------
 # Both `frontier_search_wedgebucket_cascade` and
 # `frontier_search_umbrella_xing` write per-phase elapsed time into this
-# module-level dict. Filter-stage (Stage 1) time is NEVER recorded here —
-# survivors are already loaded from pickle by the time these functions are
-# called. So all values below measure ONLY the Stage 2 algorithm work,
-# uniformly across both algorithms.
+# module-level dict. Property-filter (P1-P5) time is NEVER recorded here —
+# filtering has already finished by the time these functions are called.
+# So all values below measure ONLY the search work, uniformly across both
+# algorithms.
 #
 # Use:
 #   from geowedge_search import reset_phase_timing, get_phase_timing
@@ -279,7 +279,7 @@ def frontier_search_adaptive(transactions: List[Txn], trigger_eid: str,
 #
 # Formal claims for the paper:
 #   * Recall ≥ max(recall_greedy, recall_unaugmented_bucket).
-#   * (1+δ)·ε-approximation w.r.t. the IIO definition.
+#   * (1+δ)·ε-approximation w.r.t. the feasible-wedge definition.
 #   * O(B + N) state per anchor (B = number of signed buckets, N =
 #     candidate count), independent of subset-enumeration explosion.
 # ==========================================================================
@@ -435,7 +435,7 @@ def frontier_search_tasb(transactions: List[Txn], trigger_eid: str,
 #       Hence v3 implicitly preserves greedy coverage without ever
 #       running a separate greedy walk.
 #
-# Paper-grade narrative collapses to:
+# Summary:
 #   "TASB extends Ibarra-Kim FPTAS with (a) logarithmic-scale lattice,
 #    (b) sign-aware bucketing, and (c) advance-prioritized tiebreak.
 #    These three modifications, applied to a single state frontier,
@@ -563,7 +563,7 @@ def frontier_search_tasb_v3(transactions: List[Txn], trigger_eid: str,
 #
 # THE unified single-criterion algorithm:
 #
-#   Φ(c) measures the L¹ distance from state c = (S_A, S_B) to the IIO
+#   Φ(c) measures the L¹ distance from state c = (S_A, S_B) to the feasible
 #   wedge W = { (x, y) : x ≥ θ, (1-ε)x ≤ y ≤ (1+ε)x }:
 #
 #       Φ(c) = max(0, θ - S_A)
@@ -579,12 +579,12 @@ def frontier_search_tasb_v3(transactions: List[Txn], trigger_eid: str,
 #   approaches the wedge boundary.
 #
 # One algorithm. One score. One state set. No greedy thread.
-# Equivalent paper-grade narrative:
+# Summary:
 #   "A signed geometric bucket search whose representatives are
 #    selected by a wedge-directed criterion."
 # ==========================================================================
 def wedge_offset(sa: float, sb: float, theta: float, eps: float) -> float:
-    """L¹ distance from (SA, SB) to the valid IIO wedge."""
+    """L¹ distance from (SA, SB) to the feasible wedge."""
     phi = 0.0
     if sa < theta:
         phi += theta - sa
@@ -608,14 +608,11 @@ def wedge_bucket_compress(states: List[State],
     Optional safety cap: when |result| exceeds `max_states`, retain only
     the `max_states` states with smallest Φ (closest to wedge).
 
-    Performance notes (measured Jul 2026):
-      * Precompute 1.0/log(1+δ_*) ONCE per call — avoids ~40k redundant
-        math.log(1+δ) calls on hot windows (was 27% of total bucket time
-        per profiler).
+    Performance notes:
+      * Precompute 1.0/log(1+δ_*) ONCE per call — avoids redundant
+        math.log(1+δ) calls on hot windows.
       * Inline log_bucket to remove function-call overhead.
       * Hoist constants (one_minus_eps, one_plus_eps) out of loop.
-    Combined: ~1.8× speedup on hot windows vs the original log_bucket()
-    dispatch, verified via bench_wedge_bucket_compress.py.
     """
     # ---- Precompute constants (hoisted out of hot loop) ----
     _log = math.log
@@ -684,14 +681,15 @@ def wedge_bucket_compress(states: List[State],
     return [v[0] for v in items]
 
 
-def frontier_search_wedgebucket(transactions: List[Txn], trigger_eid: str,
-                                  theta: float, eps: float,
-                                  delta_sa: float = 0.1,
-                                  delta_d: float = 0.1,
-                                  max_states: int = 4000
-                                  ) -> Optional[State]:
-    """Wedge-guided signed bucket search. A single unified algorithm in
-    the FPTAS family for streaming 2D subset-sum feasibility.
+def frontier_search(transactions: List[Txn], trigger_eid: str,
+                    theta: float, eps: float,
+                    delta_sa: float = 0.1,
+                    delta_d: float = 0.1,
+                    max_states: int = 4000
+                    ) -> Optional[State]:
+    """FrontierSearch (Algorithm 4): wedge-guided signed bucket search.
+    A single unified algorithm in the FPTAS family for streaming 2D
+    subset-sum feasibility.
 
     The per-cell representative selection criterion is
         argmin_c  Φ(c),
@@ -825,11 +823,11 @@ def frontier_search_wedgebucket_cascade(transactions: List[Txn],
 
     If `bucket_enabled=False`, the Phase-2 wedge-bucket fallback is skipped
     and the function returns None whenever greedy misses. This is an
-    ABLATION switch — production behaviour uses the default True. Used by
-    ablation_cascade/ to quantify how many alerts the bucket tier rescues.
+    ABLATION switch — the default True keeps the full algorithm. It
+    measures how many positive answers the bucket tier contributes.
     """
-    # Per-call timer starts here — survivors are already loaded;
-    # filter-stage time is NOT measured.
+    # Per-call timer starts here — survivors are already filtered;
+    # property-filter time is NOT measured.
     _t_call_start = time.perf_counter()
     _PHASE_TIMING["cascade_calls"] += 1
 
@@ -888,7 +886,7 @@ def frontier_search_wedgebucket_cascade(transactions: List[Txn],
         return None
     _PHASE_TIMING["cascade_bucket_invocations"] += 1
     _t_bucket_start = time.perf_counter()
-    result = frontier_search_wedgebucket(
+    result = frontier_search(
         transactions, trigger_eid, theta, eps,
         delta_sa=delta_sa, delta_d=delta_d, max_states=max_states,
     )
@@ -899,7 +897,7 @@ def frontier_search_wedgebucket_cascade(transactions: List[Txn],
 # ==========================================================================
 # Bucket-Greedy — greedy walks over BUCKETS instead of transactions.
 #
-# Idea (motivated by user):  group log-scale buckets first, then run the
+# Idea:  group log-scale buckets first, then run the
 # alternating-largest greedy WALK at bucket granularity, where each step
 # advances by one bucket's representative statistic (mean / max / min /
 # median). Within a step, we additionally choose adaptively how many
@@ -919,7 +917,7 @@ def frontier_search_wedgebucket_cascade(transactions: List[Txn],
 #   (1+δ)^B. Validity is checked with the (1+δ)·ε relaxed wedge, which
 #   exactly absorbs this slack.
 #
-# Reviewer hook:
+# Summary:
 #   "A bucket-quantized variant of the alternating-largest greedy
 #    walker, attaining the same (1+δ)·ε approximation factor as
 #    WedgeBucket but with O(B) per-anchor work and no state-frontier
@@ -1034,7 +1032,7 @@ def frontier_search_bucket_greedy(transactions: List[Txn], trigger_eid: str,
 # switch to full bucket-compressed multi-state expansion. Once opened,
 # stay open until candidates exhausted (sticky umbrella).
 #
-# Intuition (user's framing):
+# Intuition:
 #   Greedy fails when it commits to a wrong step near the wedge boundary
 #   and overshoots into oblivion. The umbrella catches this: when the
 #   geometry says "next step matters", we explore alternative subset
@@ -1043,7 +1041,7 @@ def frontier_search_bucket_greedy(transactions: List[Txn], trigger_eid: str,
 # Threshold τ:
 #   τ = c · ε · θ        (default c = 2.0)
 #   c=0  → umbrella never opens   (= pure greedy)
-#   c=∞  → umbrella always open   (= wedgebucket)
+#   c=∞  → umbrella always open   (= frontier_search)
 #   c=2  → sweet spot:  ε-band wide enough for greedy's typical "wrong
 #                       step" magnitudes, narrow enough to stay greedy
 #                       on the far approach.
@@ -1053,7 +1051,7 @@ def frontier_search_bucket_greedy(transactions: List[Txn], trigger_eid: str,
 #     commits an irreversible wrong step. The threshold c only
 #     approximates this — there's no general guarantee that the
 #     umbrella opens "early enough" on adversarial inputs.
-#   - Empirical:  on LI-Small, typical valid IIO subsets are
+#   - Empirical:  on LI-Small, typical feasible package pairs are
 #     diagonal-aligned, so greedy's trajectory passes through wedge
 #     proximity with high probability. Umbrella opens in time to
 #     catch most of the missed cases.
@@ -1157,14 +1155,14 @@ def frontier_search_umbrella(transactions: List[Txn], trigger_eid: str,
 # overshoot, and exactly where local bucket exploration can rescue valid
 # subsets that lie BETWEEN the pre-crossing and post-crossing states.
 #
-# Crossing detection (algebraic):
+# Crossing test (algebraic):
 #   Let side(s) ∈ {-1, 0, +1}:
 #     -1 if S_B < (1-ε)·S_A       (below wedge)
 #      0 if S_A < θ  OR  s in wedge  (pre-wedge or valid)
 #     +1 if S_B > (1+ε)·S_A       (above wedge)
 #   Crossing  ⇔  side(s_cur) ≠ 0 ∧ side(s_next) ≠ 0 ∧ side(s_cur) ≠ side(s_next).
 #
-# When crossing detected, opens bucket starting from s_current (NOT
+# When a crossing is found, opens bucket starting from s_current (NOT
 # s_next), since the valid subset must use a candidate of intermediate
 # magnitude (between 0 and next_amt) which greedy's single biggest pick
 # would skip.
@@ -1179,8 +1177,8 @@ def frontier_search_umbrella(transactions: List[Txn], trigger_eid: str,
 #     very effective.
 #
 # Approximation: heuristic, not strict (1+δ)·ε-FPTAS.
-# Reviewer-friendly framing:
-#   "A greedy walker augmented with overshoot detection: when the
+# Summary:
+#   "A greedy walker augmented with an overshoot check: when the
 #    next greedy step would cross the wedge boundary, the algorithm
 #    halts greedy commitment and launches a bucket-compressed local
 #    search from the pre-crossing state."
@@ -1278,8 +1276,8 @@ def frontier_search_umbrella_xing(transactions: List[Txn], trigger_eid: str,
     Per-call phase timing is accumulated into the module-level
     `_PHASE_TIMING` dict for fair external comparison.
     """
-    # Per-call timer starts here — survivors are already loaded;
-    # filter-stage time is NOT measured.
+    # Per-call timer starts here — survivors are already filtered;
+    # property-filter time is NOT measured.
     _t_call_start = time.perf_counter()
     _PHASE_TIMING["umbrella_xing_calls"] += 1
 
@@ -1355,7 +1353,7 @@ def frontier_search_umbrella_xing(transactions: List[Txn], trigger_eid: str,
             _PHASE_TIMING["umbrella_xing_greedy_hits"] += 1
             return State(sa=new_sa, sb=new_sb)
 
-        # Wedge-crossing detection
+        # Wedge-crossing check
         cur_side = side_of(sa, sb)
         new_side = side_of(new_sa, new_sb)
         crossing = (cur_side != 0 and new_side != 0 and cur_side != new_side)

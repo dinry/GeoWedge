@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CLI entry: run one selected baseline on an IBM AML transaction stream.
+"""CLI entry: run one selected baseline on a tuple stream.
 
 Default parameters match the headline configuration:
     theta = 10000, eps = 0.2, Delta = 0.1 day, k = 8
@@ -33,7 +33,7 @@ def parse_args():
     p.add_argument(
         "--data",
         default="data/LI-Small_Trans.csv",
-        help="Path to an IBM AML transaction CSV file.",
+        help="Path to a stream CSV file.",
     )
     p.add_argument("--theta",       type=float, default=10000.0)
     p.add_argument("--eps",         type=float, default=0.2)
@@ -65,8 +65,7 @@ def main():
 
     for spec in to_run:
         run_one_baseline(
-            detect_fn=spec.detect,
-            baseline_id=spec.id,
+            query_fn=spec.query,
             baseline_name=spec.name,
             params=params,
             csv_path=args.data,

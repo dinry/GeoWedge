@@ -1,4 +1,4 @@
-# GeoWedge Reviewer Release
+# GeoWedge
 
 This folder contains the core code needed to inspect and reproduce the
 GeoWedge streaming package-existence experiments. It intentionally excludes
@@ -8,8 +8,8 @@ notebooks.
 ## Contents
 
 ```text
-run_geowedge.py                     reviewer-facing entry point for GeoWedge
-data/                               place downloaded IBM AML CSV files here
+run_geowedge.py                     entry point for GeoWedge
+data/                               place downloaded stream CSV files here
 geowedge/
   streaming.py                      streaming loader and filtering pipeline
   state_search.py                   shared state objects and basic search
@@ -21,6 +21,7 @@ baselines/
     methods.py                      baseline registry and C++ dispatch
     runner.py                       shared streaming runner
     cpp_backend/                    C++17 pybind11 backend for TopK/Greedy
+    solver_ilp.py                   exact ILP evaluation (accuracy reference)
     solver_sketchrefine.py          SketchRefine solver port
     solver_progressive_shading.py   Progressive Shading solver port
     parallel_dual_simplex.py        LP helper used by Progressive Shading
@@ -28,21 +29,23 @@ baselines/
 
 ## Data
 
-The datasets are not included because the raw CSV files are large. Download the
-IBM Transactions for Anti Money Laundering (AML) dataset from IBM's official
-AML-Data page:
+The experiments run over six public streams of timestamped tuples. Each tuple
+has the form `(src, dst, amt, time)`: a source key, a destination key, an
+amount, and an arrival time. The raw CSV files are large and are not included
+in this release. Download them from the original
+[GitHub repository](https://github.com/IBM/AML-Data) or its
+[Kaggle mirror](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml).
 
-- IBM AML-Data repository: https://github.com/IBM/AML-Data
-- Kaggle distribution linked by IBM: https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml
+The following stream files are used:
 
-The experiments use the following transaction files:
-
-- `LI-Small_Trans.csv`
-- `LI-Medium_Trans.csv`
-- `LI-Large_Trans.csv`
-- `HI-Small_Trans.csv`
-- `HI-Medium_Trans.csv`
-- `HI-Large_Trans.csv`
+| File                  | Series | Scale  |
+|-----------------------|--------|--------|
+| `LI-Small_Trans.csv`  | LI     | Small  |
+| `LI-Medium_Trans.csv` | LI     | Medium |
+| `LI-Large_Trans.csv`  | LI     | Large  |
+| `HI-Small_Trans.csv`  | HI     | Small  |
+| `HI-Medium_Trans.csv` | HI     | Medium |
+| `HI-Large_Trans.csv`  | HI     | Large  |
 
 Place the downloaded CSV files under `data/`:
 
@@ -52,11 +55,11 @@ mkdir -p data
 # mv /path/to/LI-Small_Trans.csv data/
 ```
 
-Each CSV is expected to keep the original IBM AML column names, including
-`Account`, `Timestamp`, `Amount Paid`, `Account.1`, and `Is Laundering`.
+Keep the original CSV header unchanged; the loader selects columns by their
+original names.
 
-The original IBM AML transaction files may not be ordered by time. Sort the
-downloaded CSV files before running streaming experiments:
+Tuples are processed in arrival order, but the raw files are not guaranteed to
+be sorted by time. Sort them once before running the experiments:
 
 ```bash
 python data/prepare_data.py --data-dir data
@@ -80,15 +83,36 @@ pip install -r requirements.txt
 
 This release can run the pure-Python GeoWedge implementation directly after
 installing the requirements. To run the C++ GeoWedge backend or the
-C++-accelerated TopK/Greedy baselines, build the corresponding pybind11
-extensions first.
+C++-accelerated TopK/Greedy baselines, build the C++ extensions first (see
+below).
 
 ## Build C++ Extensions
 
-The default `geowedge` mode uses the pure-Python implementation in
-`geowedge/geowedge_search.py`. The C++ backend is provided in
-`geowedge/cpp_bucket/` and is called from Python through
-`geowedge/cpp_backend.py`. Build it before running `--algo geowedge_cpp`:
+Compiled extensions are not shipped with this repository. Two pybind11
+extensions must be built locally before running the C++ code paths:
+
+| Extension           | Source directory        | Needed for                                                            |
+|---------------------|-------------------------|-----------------------------------------------------------------------|
+| `wedge_bucket_cpp`  | `geowedge/cpp_bucket/`  | `--algo geowedge_cpp`                                                 |
+| `baseline_cpp_core` | `baselines/cpp_backend/`| `topk_value`, `topk_ratio`, `greedy_value`, `greedy_ratio`, `greedy_fill` |
+
+The pure-Python `geowedge` mode, SketchRefine, and Progressive Shading need no
+build step.
+
+### Prerequisites
+
+- A C++17 compiler:
+  - macOS: Xcode Command Line Tools (`xcode-select --install`)
+  - Linux: `g++` 7 or newer (for example, `sudo apt install build-essential`)
+- The Python environment from the previous section, activated, with
+  `requirements.txt` installed (this provides `pybind11` and `setuptools`).
+
+Build with the same Python interpreter you will use to run the experiments;
+an extension built for one Python version cannot be imported by another.
+
+### Build
+
+From the repository root:
 
 ```bash
 cd geowedge/cpp_bucket
@@ -96,19 +120,41 @@ python setup.py build_ext --inplace
 cd ../..
 ```
 
-The TopK and Greedy baselines share one C++17 backend through pybind11. Build
-it before running `topk_value`, `topk_ratio`, `greedy_value`, `greedy_ratio`,
-or `greedy_fill`:
-
 ```bash
 cd baselines/cpp_backend
 python setup.py build_ext --inplace
 cd ../..
 ```
 
-SketchRefine and Progressive Shading are reviewer-facing Python ports that use
-SciPy HiGHS for LP/ILP solving, avoiding external Gurobi or PostgreSQL setup.
-They do not require a separate C++ build.
+Each command places a shared library next to its source file, for example
+`geowedge/cpp_bucket/wedge_bucket_cpp.cpython-313-darwin.so` (the suffix
+depends on your Python version and platform). Both setup scripts compile with
+`-O3 -march=native`.
+
+### Verify
+
+```bash
+python -c "import sys; sys.path.insert(0, 'geowedge/cpp_bucket'); import wedge_bucket_cpp; print('wedge_bucket_cpp OK')"
+```
+
+```bash
+python -c "import sys; sys.path.insert(0, 'baselines/cpp_backend'); import baseline_cpp_core; print('baseline_cpp_core OK')"
+```
+
+If an extension is missing, the runner stops with an `ImportError` that names
+the build command to run.
+
+### Rebuild
+
+Rebuild after editing a `.cpp` file or switching Python versions. Remove the
+old build output first:
+
+```bash
+rm -rf geowedge/cpp_bucket/build geowedge/cpp_bucket/*.so
+rm -rf baselines/cpp_backend/build baselines/cpp_backend/*.so
+```
+
+Then repeat the build commands above.
 
 ## Run GeoWedge
 
@@ -142,7 +188,7 @@ python run_geowedge.py \
   --reset
 ```
 
-The runner writes checkpoints, per-transaction records, and summary files to
+The runner writes checkpoints, per-tuple records, and summary files to
 `outputs/`. If a run is interrupted, rerun the same command without `--reset`
 to resume from the checkpoint.
 
@@ -161,6 +207,7 @@ python baselines/run_baseline.py \
 Available baseline names are:
 
 ```text
+ilp
 topk_value
 greedy_value
 topk_ratio

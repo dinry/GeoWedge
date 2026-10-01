@@ -12,7 +12,7 @@ The original SKETCHREFINE algorithm has three stages:
   3. REFINE     — replace each non-empty group's representative with the
                   actual tuples, re-solve a smaller ILP.
 
-Adapted to the streaming EPFlow setting:
+Adapted to the streaming pass-through flow setting:
 
   * The "input relation" is the current window's raw in-list (resp. out-list).
   * The only predicate attribute is `amount`, so partitioning is 1-D.
@@ -28,16 +28,16 @@ Adapted to the streaming EPFlow setting:
   * SKETCH: integer-multiplicity ILP on the K resulting representatives per
     side (K is data-dependent, no longer a fixed K).
   * REFINE: when the sketch is feasible, gather all tuples from groups the
-    sketch touched (n_g > 0) and resolve as a tuple-level ILP (DIRECT-style)
+    sketch touched (n_g > 0) and resolve as a tuple-level ILP (ILP-baseline style)
     restricted to those tuples.
 
-Solver: scipy.optimize.milp (in-process HiGHS), same reason as baseline 9.
+Solver: scipy.optimize.milp (in-process HiGHS), same as the ILP baseline.
 The 100-500ms PuLP+CBC subprocess overhead would otherwise dominate.
 
-Pre-filter: same O(1) trivial-infeasibility checks as DIRECT, before either
+Pre-filter: same O(1) trivial-infeasibility checks as the ILP baseline, before either
 ILP is constructed.
 
-Reviewer intuition:  "what if we approximate first on partition representatives,
+Intuition:           "what if we approximate first on partition representatives,
                      then refine inside the touched partitions? — with the
                      representative approximation error bounded by ω = ε per
                      PaQL Definition 2."
@@ -57,7 +57,6 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 
 
-ID   = 10
 NAME = "sketchrefine"
 
 # ── Adaptive-partitioning parameters (primary, PaQL DLV-style) ──
@@ -69,10 +68,10 @@ NAME = "sketchrefine"
 # group — the 1-D analog of PaQL Definition 2's radius limit ω = γ · |t̃|
 # with γ = ε (Brucato'16, Theorem 3).
 #
-# By default we tie RADIUS_EPS to the wedge tolerance ε passed into detect()
+# By default we tie RADIUS_EPS to the wedge tolerance ε passed into query()
 # (the reasonable "match the query" setting). RADIUS_EPS below can be
 # monkey-patched by benchmarks if a different constant is desired.
-RADIUS_EPS = None          # None → use the query `eps` in detect()
+RADIUS_EPS = None          # None → use the query `eps` in query()
 
 # MAX_GROUP_SIZE bounds the number of tuples per group (PaQL Definition 1's
 # size threshold τ). Guards against pathologically long uniform runs
@@ -241,7 +240,7 @@ def _solve_sketch(in_reps, in_sizes, out_reps, out_sizes,
 
 
 # ---------------------------------------------------------------------------
-# Refine ILP   (binary per-tuple over touched groups; same form as DIRECT)
+# Refine ILP   (binary per-tuple over touched groups; same form as the ILP baseline)
 # ---------------------------------------------------------------------------
 def _solve_refine(in_amts, out_amts, in_init, out_init, theta, eps, time_limit):
     n_in, n_out = len(in_amts), len(out_amts)
@@ -275,16 +274,16 @@ def _solve_refine(in_amts, out_amts, in_init, out_init, theta, eps, time_limit):
 
 
 # ---------------------------------------------------------------------------
-# Main detector
+# Main query entry
 # ---------------------------------------------------------------------------
-def detect(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
+def query(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
     in_amts  = np.fromiter((amt for _, amt in raw_in),  dtype=np.float64)
     out_amts = np.fromiter((amt for _, amt in raw_out), dtype=np.float64)
 
     in_init  = trigger_amt if anchor_type == "in"  else 0.0
     out_init = trigger_amt if anchor_type == "out" else 0.0
 
-    # ---- O(1) trivial-infeasibility pre-filter (same as DIRECT) ----
+    # ---- O(1) trivial-infeasibility pre-filter (same as the ILP baseline) ----
     in_sum  = in_amts.sum()  if in_amts.size  else 0.0
     out_sum = out_amts.sum() if out_amts.size else 0.0
     if in_init + in_sum < theta:
@@ -326,4 +325,4 @@ def detect(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
 
 
 if __name__ == "__main__":
-    cli_main(detect, ID, NAME)
+    cli_main(query, NAME)

@@ -3,7 +3,7 @@
 
 All search functions share the same `frontier_search(transactions, trigger_eid,
 theta, eps, ...) -> Optional[State]` signature, so they can be plugged into the
-same detection pipeline interchangeably.
+same query pipeline interchangeably.
 
 Original sources:
     frontier enumeration       -> frontier_search_enum
@@ -143,7 +143,7 @@ def _initial_states(transactions: List[Txn], trigger_eid: str
     """Build the initial state and the candidate order.
 
     Two perf-critical choices:
-      * We do NOT populate `selected`. Downstream code (phase2_recall) only
+      * We do NOT populate `selected`. Downstream code only
         checks whether `frontier_search_*` returns None or a state — it never
         uses `.selected`. Dropping the tuple-concat in `_expand` saves a large
         constant factor on enum/dom.
@@ -163,7 +163,7 @@ def _initial_states(transactions: List[Txn], trigger_eid: str
 
 def _expand(states: List[State], z: Txn) -> List[State]:
     """Branch each state into {skip z, select z}. We do not propagate
-    `selected` since detection-mode callers never inspect it."""
+    `selected` since query-mode callers never inspect it."""
     out = []
     amt = z.amount
     if z.direction == "in":

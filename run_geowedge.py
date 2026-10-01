@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Run GeoWedge on an IBM AML transaction stream.
+"""Run GeoWedge on a tuple stream.
 
-This is a compact reviewer-facing entry point. It loads one transaction CSV,
+This is a compact entry point. It loads one stream CSV,
 streams it in timestamp order, applies the property filters, and calls the
 GeoWedge compressed frontier-search routine for the remaining candidates.
 """
@@ -20,7 +20,7 @@ if str(GEOWEDGE_DIR) not in sys.path:
 import cpp_backend
 import geowedge_search
 import streaming
-from streaming import Config, detect_stream, load_li_small_dataframe
+from streaming import Config, query_stream, load_stream_dataframe
 
 
 ALGORITHMS = {
@@ -29,7 +29,7 @@ ALGORITHMS = {
         {"delta_sa": 0.1, "delta_d": 0.1, "max_states": 4000},
     ),
     "frontier_bucket": (
-        geowedge_search.frontier_search_wedgebucket,
+        geowedge_search.frontier_search,
         {"delta_sa": 0.1, "delta_d": 0.1, "max_states": 4000},
     ),
     "geowedge_cpp": (
@@ -46,9 +46,9 @@ def _to_txns_nocap(in_list, out_list, anchor_amt, anchor_dir, max_candidates):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run GeoWedge on IBM AML data.")
+    parser = argparse.ArgumentParser(description="Run GeoWedge on a tuple stream.")
     parser.add_argument("--data", default="data/LI-Small_Trans.csv",
-                        help="Path to an IBM AML transaction CSV file.")
+                        help="Path to a stream CSV file.")
     parser.add_argument("--dataset-name", default="LI-Small",
                         help="Name used in output files.")
     parser.add_argument("--algo", choices=sorted(ALGORITHMS), default="geowedge",
@@ -101,12 +101,12 @@ def main():
     )
 
     data_path = Path(args.data)
-    df = load_li_small_dataframe(str(data_path), nrows=args.nrows,
-                                 skip_rows=args.skip_rows)
+    df = load_stream_dataframe(str(data_path), nrows=args.nrows,
+                               skip_rows=args.skip_rows)
     technique_fn, technique_kwargs = ALGORITHMS[args.algo]
     technique_name = f"{args.algo}_{args.dataset_name}"
 
-    detect_stream(
+    query_stream(
         df=df,
         cfg=cfg,
         technique_fn=technique_fn,

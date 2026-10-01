@@ -46,7 +46,7 @@ WHAT WAS UNAVOIDABLY ADAPTED
     problems make thread parallelism counterproductive; numpy still exploits
     the same O(n) vectorization the C++ code parallelizes across cores).
   * Gurobi → scipy.optimize.milp with HiGHS backend (for the FINAL ILP only,
-    matching DIRECT and SR for solver-identity fairness).
+    matching the ILP baseline and SketchRefine for solver-identity fairness).
 
 PARALLEL DUAL SIMPLEX (strict port from dual.cpp)
 -------------------------------------------------
@@ -94,11 +94,11 @@ WHAT THIS FAITHFUL PORT REVEALS ABOUT PS ON STREAMS
           GurobiSolver.solveIlp();    // off-the-shelf ILP with mip_gap=1e-4
           return
   → For windows with n < 500 (~90% of streaming anchors): everything goes
-    through HiGHS LP + ILP, identical to the DIRECT baseline.
+    through HiGHS LP + ILP, identical to the ILP baseline.
   → For windows with n >= 500 (~10% of streaming anchors — "hot accounts"):
     the LP-based reduction, PDS calls, and Dual Reducer fallback machinery
     ARE exercised.  This is where paper-faithful PS actually differs from
-    DIRECT on our streams.
+    the ILP baseline on our streams.
 
   THIS TWO-STAGE STRUCTURE IS THE PAPER'S OWN LOGIC.  It reveals that PS's
   contributions are architecturally scoped to relations with either >100k
@@ -122,7 +122,6 @@ from scipy.optimize import milp, linprog, LinearConstraint, Bounds
 from parallel_dual_simplex import ParallelDualSimplex, solve_max as pds_solve_max
 
 
-ID   = 11
 NAME = "progressive_shading"
 
 
@@ -477,10 +476,10 @@ def dual_reducer_solve(A_ub, b_ub, c, lb, ub, is_safe=True, ilp_size=K_ILP_SIZE,
             # Gurobi's behavior (LP infeasibility implies ILP infeasibility).
             return "NotFound", np.zeros(n, dtype=np.int64)
         # (ii) ILP with min_gap — matches gs.solveIlp(min_gap, time_limit) (line 95)
-        # NOTE: presolve=False mirrors the DIRECT baseline. HiGHS's
+        # NOTE: presolve=False mirrors the ILP baseline. HiGHS's
         # presolve routine has known numerical issues on large-coefficient
         # windows that can silently return infeasible where a witness exists
-        # (task #111 fix — same class of bug DIRECT hit before its patch).
+        # (the ILP baseline disables presolve for the same reason).
         res = milp(
             c,
             constraints=LinearConstraint(A_ub, -np.inf, b_ub),
@@ -489,7 +488,7 @@ def dual_reducer_solve(A_ub, b_ub, c, lb, ub, is_safe=True, ilp_size=K_ILP_SIZE,
             options={
                 "time_limit":  time_limit,
                 "mip_rel_gap": min_gap,        # ← kMinGapOpt = 1e-4
-                "presolve":    False,           # ← task #111 fix
+                "presolve":    False,           # ← avoid spurious presolve infeasibility
                 "disp":        False,
             },
         )
@@ -764,7 +763,7 @@ def _direct_dual_reducer_call(in_amts, out_amts, in_init, out_init, theta, eps,
     Handles the edge case where ONE side has 0 tuples (empty in_amts or
     out_amts) — the ILP still has variables on the non-empty side and the
     trigger contributes to the anchor side's aggregate.  This matches
-    the DIRECT baseline, which does NOT short-circuit on empty side.
+    the ILP baseline, which does NOT short-circuit on empty side.
     """
     n_in, n_out = in_amts.size, out_amts.size
     n = n_in + n_out
@@ -786,7 +785,7 @@ def _direct_dual_reducer_call(in_amts, out_amts, in_init, out_init, theta, eps,
     # PaQL §3.1: "If the query does not contain an objective clause, we add
     # the vacuous objective sum_i 0 * x_i."  For our wedge feasibility query
     # (no MINIMIZE/MAXIMIZE), c = 0 is the paper-strict choice.  This matches
-    # the DIRECT baseline exactly, which is the correct behavior since the
+    # the ILP baseline exactly, which is the correct behavior since the
     # bypass path IS the paper's own direct-ILP path (lsr.cpp lines 111-138).
     c_obj = np.zeros(n, dtype=np.float64)
     lb = np.zeros(n, dtype=np.float64)
@@ -822,7 +821,7 @@ def layered_sketch_refine(
     #     return
     # In our streaming setting, per-anchor windows are always < lp_size (=100k),
     # so this fast path fires on 100% of anchors when strictly matching paper.
-    # This means PS on streaming reduces to DIRECT via Dual Reducer's small-n
+    # This means PS on streaming reduces to the ILP baseline via Dual Reducer's small-n
     # path — an HONEST measurement of paper-faithful behavior.
     total_n = in_amts.size + out_amts.size
     if total_n <= lp_size:
@@ -935,13 +934,13 @@ def layered_sketch_refine(
 # ============================================================================
 # Runner entrypoint  (called per-anchor by baselines/runner.py)
 # ============================================================================
-def detect(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
-    """Progressive Shading feasibility detector — strict paper faithful.
+def query(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
+    """Progressive Shading package-existence query — strict paper faithful.
 
     NOTE: NO O(1) trivial-infeasibility prefilter (was previously added as
     an engineering shortcut; removed per the paper's canonical algorithm).
 
-    NOTE (empty-side handling): the DIRECT baseline does NOT short-circuit
+    NOTE (empty-side handling): the ILP baseline does NOT short-circuit
     when one side has 0 tuples, because when the trigger is on the empty
     side, its own amount contributes to SA (or SB) and the wedge may still
     be feasible.  We follow the same policy: let the ILP formulation
@@ -970,4 +969,4 @@ def detect(raw_in, raw_out, trigger_amt, anchor_type, theta, eps, **kwargs):
 
 
 if __name__ == "__main__":
-    cli_main(detect, ID, NAME)
+    cli_main(query, NAME)

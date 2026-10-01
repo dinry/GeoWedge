@@ -1,4 +1,4 @@
-// C++17 core routines for reviewer-facing baselines.
+// C++17 core routines for the baselines.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -90,7 +90,7 @@ static std::vector<double> topk_by_ratio(Array arr, double trigger, int k) {
     return values;
 }
 
-static int detect_topk_value(Array in_arr, Array out_arr,
+static int query_topk_value(Array in_arr, Array out_arr,
                              double trigger, const std::string& anchor_type,
                              double theta, double eps, int k) {
     auto in_amts = topk_by_value(in_arr, k);
@@ -100,7 +100,7 @@ static int detect_topk_value(Array in_arr, Array out_arr,
     return enumerate_subsets(in_amts, out_amts, initial_sa, initial_sb, theta, eps);
 }
 
-static int detect_topk_ratio(Array in_arr, Array out_arr,
+static int query_topk_ratio(Array in_arr, Array out_arr,
                              double trigger, const std::string& anchor_type,
                              double theta, double eps, int k) {
     auto in_amts = topk_by_ratio(in_arr, trigger, k);
@@ -134,7 +134,7 @@ static int greedy_alternating(std::vector<double> in_amts,
     return 0;
 }
 
-static int detect_greedy_value(Array in_arr, Array out_arr,
+static int query_greedy_value(Array in_arr, Array out_arr,
                                double trigger, const std::string& anchor_type,
                                double theta, double eps) {
     auto in_amts = to_vector(in_arr);
@@ -145,7 +145,7 @@ static int detect_greedy_value(Array in_arr, Array out_arr,
                               trigger, anchor_type, theta, eps);
 }
 
-static int detect_greedy_ratio(Array in_arr, Array out_arr,
+static int query_greedy_ratio(Array in_arr, Array out_arr,
                                double trigger, const std::string& anchor_type,
                                double theta, double eps) {
     auto in_amts = topk_by_ratio(in_arr, trigger, -1);
@@ -154,7 +154,7 @@ static int detect_greedy_ratio(Array in_arr, Array out_arr,
                               trigger, anchor_type, theta, eps);
 }
 
-static int detect_greedy_fill(Array in_arr, Array out_arr,
+static int query_greedy_fill(Array in_arr, Array out_arr,
                               double trigger, const std::string& anchor_type,
                               double theta, double eps) {
     auto in_amts = to_vector(in_arr);
@@ -201,10 +201,10 @@ static int detect_greedy_fill(Array in_arr, Array out_arr,
 }
 
 PYBIND11_MODULE(baseline_cpp_core, m) {
-    m.doc() = "C++17 core decision routines for reviewer-facing baselines.";
-    m.def("detect_topk_value", &detect_topk_value);
-    m.def("detect_topk_ratio", &detect_topk_ratio);
-    m.def("detect_greedy_value", &detect_greedy_value);
-    m.def("detect_greedy_ratio", &detect_greedy_ratio);
-    m.def("detect_greedy_fill", &detect_greedy_fill);
+    m.doc() = "C++17 core query routines for the baselines.";
+    m.def("query_topk_value", &query_topk_value);
+    m.def("query_topk_ratio", &query_topk_ratio);
+    m.def("query_greedy_value", &query_greedy_value);
+    m.def("query_greedy_ratio", &query_greedy_ratio);
+    m.def("query_greedy_fill", &query_greedy_fill);
 }

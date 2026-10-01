@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Shared streaming pipeline for the baseline detectors.
+"""Shared streaming pipeline for the baseline query methods.
 
 The runner streams rows, maintains the sliding window, and invokes a selected
 baseline at every transaction-anchor query. It reports query-processing
-statistics rather than treating IBM's laundering flag as a classification
-label.
+statistics only.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ import numpy as np
 
 # Reuse the GeoWedge loader and stream window.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "geowedge"))
-from streaming import Config, OUT_FLAG, StreamDetector, load_li_small_dataframe  # noqa: E402
+from streaming import Config, OUT_FLAG, StreamQuery, load_stream_dataframe  # noqa: E402
 
 
 # ==========================================================================
@@ -32,7 +31,7 @@ def topk_enumerate_numpy(top_in_amts, top_out_amts,
     """Vectorised full enumeration of all 2^(K_in + K_out) subsets.
 
     No pruning, no shortcut — just numpy-vectorised "compute every subset
-    sum and check whether any (SA, SB) pair satisfies the IIO predicate".
+    sum and check whether any (SA, SB) pair satisfies the package-existence predicate".
 
     Returns 1 if any valid subset exists, else 0.
     """
@@ -62,8 +61,7 @@ def topk_enumerate_numpy(top_in_amts, top_out_amts,
 # ==========================================================================
 # Streaming driver
 # ==========================================================================
-def run_one_baseline(detect_fn,
-                      baseline_id: int,
+def run_one_baseline(query_fn,
                       baseline_name: str,
                       params: dict,
                       csv_path: str,
@@ -73,10 +71,10 @@ def run_one_baseline(detect_fn,
                       progress_every: int = 200_000,
                       dataset_name: str = "LI-Small",
                       latency_unit: str = "us"):
-    """Stream an IBM AML CSV and run `detect_fn` at every (tx, anchor) pair.
+    """Stream a CSV file and run `query_fn` at every (tx, anchor) pair.
 
-    detect_fn signature:
-        detect_fn(raw_in, raw_out, trigger_amt, anchor_type,
+    query_fn signature:
+        query_fn(raw_in, raw_out, trigger_amt, anchor_type,
                   theta, eps, **kwargs) -> 0 or 1
 
       raw_in / raw_out are lists of (timestamp, amount) tuples from the
@@ -92,7 +90,7 @@ def run_one_baseline(detect_fn,
           f" (skip_rows={skip_rows:,}, nrows={nrows})",
           flush=True)
     t_load = time.time()
-    df = load_li_small_dataframe(csv_path, nrows=nrows, skip_rows=skip_rows)
+    df = load_stream_dataframe(csv_path, nrows=nrows, skip_rows=skip_rows)
     n_total = len(df)
     print(f"[baseline {baseline_name}] loaded {n_total:,} rows in "
           f"{time.time() - t_load:.1f}s", flush=True)
@@ -101,16 +99,16 @@ def run_one_baseline(detect_fn,
     acc_arr   = df["account_num"].astype(str).values
     opp_arr   = df["opposite_account_num"].astype(str).values
     amt_arr   = df["trans_amount"].values
-    flag_arr  = df["loan_flag"].values
+    flag_arr  = df["direction_flag"].values
 
-    detector = StreamDetector(cfg)
+    stream_query = StreamQuery(cfg)
 
     n_filter_tests = 0
     n_anchor_positives = 0
     positive_triggers = set()
 
     # ---- Per-arrival decision timing. One slot per arrival;
-    # measured strictly around the `detect_fn(...)` calls at both anchors so
+    # measured strictly around the `query_fn(...)` calls at both anchors so
     # it captures only the method's decision logic, not window I/O. Saved
     # alongside positive_triggers for cross-method timing comparison.
     if latency_unit not in ("us", "ns"):
@@ -124,7 +122,7 @@ def run_one_baseline(detect_fn,
         latency_scale = 1_000_000
 
     print(f"[baseline {baseline_name}] streaming ...  "
-          f"(runner is filter-agnostic; detect_fn owns any pre-filtering)",
+          f"(runner is filter-agnostic; query_fn owns any pre-filtering)",
           flush=True)
     t_run_start = time.time()
     t_chunk = t_run_start
@@ -136,8 +134,8 @@ def run_one_baseline(detect_fn,
         amt = float(amt_arr[idx])
         flag = flag_arr[idx]
 
-        detector.update_window(acc, t)
-        detector.update_window(opp, t)
+        stream_query.update_window(acc, t)
+        stream_query.update_window(opp, t)
 
         anchors = (
             [(acc, "out"), (opp, "in")]
@@ -154,10 +152,10 @@ def run_one_baseline(detect_fn,
         _arr_latency = 0
         for account, anchor_type in anchors:
             n_filter_tests += 1
-            raw_in  = list(detector.data[account]["in"])
-            raw_out = list(detector.data[account]["out"])
+            raw_in  = list(stream_query.data[account]["in"])
+            raw_out = list(stream_query.data[account]["out"])
             _t0 = perf_counter()
-            d = detect_fn(raw_in, raw_out, amt, anchor_type,
+            d = query_fn(raw_in, raw_out, amt, anchor_type,
                           theta, eps, **extra_kwargs)
             if latency_unit == "ns":
                 _arr_latency += int(perf_counter() - _t0)
@@ -171,11 +169,11 @@ def run_one_baseline(detect_fn,
             positive_triggers.add(idx)
 
         if flag == OUT_FLAG:
-            detector.add_tx(acc, "out", t, amt)
-            detector.add_tx(opp, "in", t, amt)
+            stream_query.add_tx(acc, "out", t, amt)
+            stream_query.add_tx(opp, "in", t, amt)
         else:
-            detector.add_tx(acc, "in", t, amt)
-            detector.add_tx(opp, "out", t, amt)
+            stream_query.add_tx(acc, "in", t, amt)
+            stream_query.add_tx(opp, "out", t, amt)
 
         if (idx + 1) % progress_every == 0:
             now = time.time()
@@ -197,7 +195,6 @@ def run_one_baseline(detect_fn,
 
     runtime = time.time() - t_run_start
     return _save_results(
-        baseline_id=baseline_id,
         baseline_name=baseline_name,
         dataset_name=dataset_name,
         params=params,
@@ -212,7 +209,7 @@ def run_one_baseline(detect_fn,
     )
 
 
-def _save_results(*, baseline_id, baseline_name, dataset_name, params,
+def _save_results(*, baseline_name, dataset_name, params,
                   n_total, n_filter_tests, n_anchor_positives,
                   positive_triggers,
                   per_arrival_latency, latency_unit, runtime, out_dir):
@@ -224,7 +221,6 @@ def _save_results(*, baseline_id, baseline_name, dataset_name, params,
     n_pos_triggers = len(positive_triggers)
 
     payload = {
-        "baseline_id":             int(baseline_id),
         "baseline_name":           baseline_name,
         "dataset_name":            dataset_name,
         "params":                  params,
@@ -260,17 +256,17 @@ def _save_results(*, baseline_id, baseline_name, dataset_name, params,
 # CLI shim: let each baseline module be run directly.
 # Each baseline module's __main__ block does:
 #     from runner import cli_main
-#     cli_main(detect, ID, NAME)
+#     cli_main(query, NAME)
 # ==========================================================================
-def cli_main(detect_fn, baseline_id: int, baseline_name: str):
+def cli_main(query_fn, baseline_name: str):
     """Parse CLI args and run the streaming pipeline for a single baseline."""
     p = argparse.ArgumentParser(
-        description=f"Run baseline {baseline_id}: {baseline_name}"
+        description=f"Run baseline: {baseline_name}"
     )
     p.add_argument(
         "--data",
         default="data/LI-Small_Trans.csv",
-        help="Path to an IBM AML transaction CSV file.",
+        help="Path to a stream CSV file.",
     )
     p.add_argument("--theta",       type=float, default=10000.0,
                    help="P1 mass threshold (default 10000).")
@@ -305,8 +301,7 @@ def cli_main(detect_fn, baseline_id: int, baseline_name: str):
     }
 
     run_one_baseline(
-        detect_fn=detect_fn,
-        baseline_id=baseline_id,
+        query_fn=query_fn,
         baseline_name=baseline_name,
         params=params,
         csv_path=args.data,

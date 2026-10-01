@@ -1,17 +1,14 @@
-// wedge_bucket_ext.cpp — C++17 implementation of wedge bucket search.
+// wedge_bucket_ext.cpp — C++17 implementation of GeoWedge.
 //
-// P1-P5 filter + log-bucket search fused into one C++ entry point.
+// PointPrune (P1-P5) + LineProbe + FrontierSearch fused into one C++ entry
+// point.
 //
-// Design differences from the numba version:
+// Implementation notes:
 //   - std::vector<double> for state arrays (no numpy overhead)
-//   - std::unordered_map<int64_t, ...> for bucket group-by (O(n) avg
-//     vs the numba sort-based O(n log n) group-by)
+//   - std::unordered_map<int64_t, ...> for bucket group-by (O(n) average)
 //   - std::partial_sort for the max_states cap (O(n log k) vs
 //     O(n log n) full sort)
 //   - Native double math, -O3 -march=native compile flags
-//
-// Recall / algorithmic behavior: bit-exact match to numba v3 modulo
-// FP reordering that -ffast-math permits.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -31,10 +28,10 @@
 namespace py = pybind11;
 
 // =========================================================================
-// P1-P5 filter
+// PointPrune: P1-P5 filter
 // =========================================================================
 static std::tuple<int, std::vector<double>, std::vector<double>, double, double>
-check_rules_cpp(std::vector<double> in_arr, std::vector<double> out_arr,
+point_prune_cpp(std::vector<double> in_arr, std::vector<double> out_arr,
                 bool anchor_side_is_in, double anchor_val,
                 double theta, double eps,
                 double sum_in, double sum_out) {
@@ -46,7 +43,7 @@ check_rules_cpp(std::vector<double> in_arr, std::vector<double> out_arr,
     int n_out = static_cast<int>(out_arr.size());
 
     for (int iter = 0; iter < 20; ++iter) {
-        // ---- rule1_4 O(1) checks ----
+        // ---- Instance-level pruning: P1-P3 O(1) checks ----
         if (anchor_side_is_in) {
             if (n_out == 0) return {0, in_arr, out_arr, sum_in, sum_out};
             if (sum_in + anchor_val < theta)
@@ -280,7 +277,7 @@ static void bucket_compress_and_alive_cpp(
 
 
 // =========================================================================
-// Main bucket search core
+// FrontierSearch (Algorithm 4): compressed frontier search core
 // =========================================================================
 struct Result {
     bool found;
@@ -288,7 +285,7 @@ struct Result {
     double sb;
 };
 
-static Result core_bucket_search_cpp(
+static Result frontier_search_cpp(
         double initial_sa, double initial_sb,
         const std::vector<double>& cand_amts,
         const std::vector<int8_t>&  cand_is_in,
@@ -388,10 +385,10 @@ static Result core_bucket_search_cpp(
 
 
 // =========================================================================
-// Adaptive-max greedy phase.
+// LineProbe (Algorithm 3): adaptive-max greedy phase.
 // =========================================================================
 //
-// Mirrors the adaptive-max greedy logic used by the cascade.
+// Probes a single trajectory toward the feasible wedge before FrontierSearch.
 //
 // Rule at each step:
 //   * If SA <= SB: grow SA by adding an IN candidate.
@@ -402,7 +399,7 @@ static Result core_bucket_search_cpp(
 //
 // Returns (found, sa, sb). Uses swap-and-pop_back for O(1) removal.
 // =========================================================================
-static Result adaptive_max_greedy_cpp(
+static Result line_probe_cpp(
         std::vector<double>& in_arr,
         std::vector<double>& out_arr,
         bool anchor_side_is_in,
@@ -504,7 +501,7 @@ static Result adaptive_max_greedy_cpp(
 
 
 // =========================================================================
-// Greedy-only public entry (filter + adaptive-max greedy, no bucket)
+// Greedy-only public entry (PointPrune + LineProbe, no FrontierSearch)
 // =========================================================================
 static py::object frontier_search_greedyonly_cpp(
         py::array_t<double, py::array::c_style | py::array::forcecast> in_amts,
@@ -525,8 +522,8 @@ static py::object frontier_search_greedyonly_cpp(
 
     const bool anchor_side_is_in = (anchor_side == "in");
 
-    // Filter (P1-P5) — reuse check_rules_cpp
-    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = check_rules_cpp(
+    // Filter (P1-P5) — reuse point_prune_cpp
+    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = point_prune_cpp(
         std::move(in_vec), std::move(out_vec),
         anchor_side_is_in, anchor_val, theta, eps, sum_in, sum_out
     );
@@ -534,8 +531,8 @@ static py::object frontier_search_greedyonly_cpp(
 
     if (flag == 0) return py::none();
 
-    // Adaptive-max greedy (no bucket fallback)
-    Result r = adaptive_max_greedy_cpp(
+    // LineProbe (no FrontierSearch fallback)
+    Result r = line_probe_cpp(
         in_pruned, out_pruned,
         anchor_side_is_in, anchor_val,
         theta, eps, delta_d
@@ -593,7 +590,7 @@ static py::object frontier_search_full_cpp(
     const bool anchor_side_is_in = (anchor_side == "in");
 
     // Filter (P1-P5)
-    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = check_rules_cpp(
+    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = point_prune_cpp(
         std::move(in_vec), std::move(out_vec),
         anchor_side_is_in, anchor_val, theta, eps, sum_in, sum_out
     );
@@ -635,7 +632,7 @@ static py::object frontier_search_full_cpp(
     }
 
     // Bucket search
-    Result result = core_bucket_search_cpp(
+    Result result = frontier_search_cpp(
         initial_sa, initial_sb,
         cand_amts, cand_is_in,
         theta, eps, delta_sa, delta_d, max_states
@@ -652,13 +649,13 @@ static py::object frontier_search_full_cpp(
 //
 // Pipeline:
 //   1. Filter (P1-P5)         — shared prep work, prunes bad candidates
-//   2. Adaptive-max greedy    — Phase 1, resolves ~90% of anchors quickly
+//   2. LineProbe              — Phase 1, resolves ~90% of anchors quickly
 //   3. If greedy fails, bucket search — Phase 2 safety net for edge cases
 //
 // Why filter FIRST and share between greedy/bucket:
 //   * P4/P5 pruning significantly shrinks bucket's state-space work
 //   * Greedy on pruned lists is slightly faster (fewer doomed candidates)
-//   * check_rules_cpp is cheap in C++ (~3-5 μs); running once and sharing
+//   * point_prune_cpp is cheap in C++ (~3-5 μs); running once and sharing
 //     the pruned lists is strictly better than any split design
 //   * Matches the cascade semantics exactly.
 //
@@ -686,13 +683,12 @@ static py::object frontier_search_cascade_impl(
 
     const bool anchor_side_is_in = (anchor_side == "in");
 
-    // Preserve the ORIGINAL caller-supplied delta_d so Phase 1 (greedy)
-    // uses it verbatim; the greedy phase takes DELTA=0.05.
-    // regardless of window size.
+    // Preserve the ORIGINAL caller-supplied delta_d so Phase 1 (LineProbe)
+    // uses it verbatim, regardless of window size.
     const double greedy_delta_d = delta_d;
 
     // ---- Step 1: Filter (P1-P5) — shared between greedy and bucket ----
-    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = check_rules_cpp(
+    auto [flag, in_pruned, out_pruned, _sum_in_p, _sum_out_p] = point_prune_cpp(
         std::move(in_vec), std::move(out_vec),
         anchor_side_is_in, anchor_val, theta, eps, sum_in, sum_out
     );
@@ -711,14 +707,14 @@ static py::object frontier_search_cascade_impl(
         }
     }
 
-    // ---- Step 2: Adaptive-max greedy (Phase 1) ----
+    // ---- Step 2: LineProbe (Phase 1) ----
     // Uses the original delta_d with no adaptive scaling.
-    // adaptive_max_greedy_cpp mutates its vectors (pop_back). So copy the
+    // line_probe_cpp mutates its vectors (pop_back). So copy the
     // pruned lists first so bucket (if needed) sees the original.
     std::vector<double> in_greedy  = in_pruned;
     std::vector<double> out_greedy = out_pruned;
 
-    Result greedy_r = adaptive_max_greedy_cpp(
+    Result greedy_r = line_probe_cpp(
         in_greedy, out_greedy,
         anchor_side_is_in, anchor_val,
         theta, eps, greedy_delta_d
@@ -735,12 +731,11 @@ static py::object frontier_search_cascade_impl(
     const int n_p = n_in_p + n_out_p;
     if (n_p == 0) return py::none();
 
-    // ---- Adaptive parameter scaling — uses POST-FILTER n (matches b14) ----
+    // ---- Adaptive parameter scaling — uses POST-FILTER n ----
     // Rationale: the wedge-bucket fallback scales based on
-    // len(candidates) which is *already pruned* by check_rules. Using the
+    // len(candidates) which is *already pruned* by PointPrune. Using the
     // pre-filter n here would coarsen the buckets unnecessarily and cause
-    // a strict subset of witnesses to survive (78 asymmetric misses observed
-    // on LI-Small full when we used pre-filter n).
+    // a strict subset of witnesses to survive.
     if (n_p > 3000) {
         delta_sa = std::max(delta_sa, 0.35);
         delta_d  = std::max(delta_d,  0.35);
@@ -774,7 +769,7 @@ static py::object frontier_search_cascade_impl(
         cand_is_in[i] = combined[i].second;
     }
 
-    Result bucket_r = core_bucket_search_cpp(
+    Result bucket_r = frontier_search_cpp(
         initial_sa, initial_sb,
         cand_amts, cand_is_in,
         theta, eps, delta_sa, delta_d, max_states, compression_mode
@@ -846,7 +841,7 @@ PYBIND11_MODULE(wedge_bucket_cpp, m) {
           py::arg("theta"),
           py::arg("eps"),
           py::arg("delta_d") = 0.05,
-          "Filter + adaptive-max greedy (no bucket). Returns None or (sa, sb).");
+          "PointPrune + LineProbe (no FrontierSearch). Returns None or (sa, sb).");
 
     m.def("frontier_search_cascade_cpp", &frontier_search_cascade_cpp,
           py::arg("in_amts"),
@@ -858,7 +853,7 @@ PYBIND11_MODULE(wedge_bucket_cpp, m) {
           py::arg("delta_sa") = 0.1,
           py::arg("delta_d")  = 0.1,
           py::arg("max_states") = 4000,
-          "Filter + adaptive-max greedy + bucket fallback (matches "
+          "PointPrune + LineProbe + FrontierSearch fallback (matches "
           "the GeoWedge cascade). Returns None or (sa, sb).");
 
     m.def("frontier_search_cascade_compression_cpp",
@@ -873,7 +868,7 @@ PYBIND11_MODULE(wedge_bucket_cpp, m) {
           py::arg("delta_d")  = 0.1,
           py::arg("max_states") = 4000,
           py::arg("compression_mode") = "log_md",
-          "Filter + adaptive-max greedy + selectable bucket fallback. "
+          "PointPrune + LineProbe + FrontierSearch with selectable compression. "
           "compression_mode in {log_md, uniform_mout, uniform_d}. "
           "Returns None or (sa, sb).");
 }

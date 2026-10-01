@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Prepare IBM AML transaction CSV files for streaming experiments.
+"""Prepare stream CSV files for streaming experiments.
 
-The original IBM AML transaction files are not guaranteed to be ordered by
+The original stream files are not guaranteed to be ordered by
 timestamp. GeoWedge evaluates a streaming query, so each CSV should be sorted
 chronologically before running the experiments.
 
@@ -26,6 +26,9 @@ DEFAULT_FILES = (
     "HI-Large_Trans.csv",
 )
 
+# Timestamp format of the original files; `streaming.py` parses this format.
+TIMESTAMP_FORMAT = "%Y/%m/%d %H:%M"
+
 
 def sort_one_csv(path: Path, timestamp_col: str = "Timestamp") -> None:
     if not path.exists():
@@ -39,23 +42,24 @@ def sort_one_csv(path: Path, timestamp_col: str = "Timestamp") -> None:
             f"{path} does not contain the timestamp column {timestamp_col!r}"
         )
 
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+    df[timestamp_col] = pd.to_datetime(df[timestamp_col], format="mixed")
     df = df.sort_values(timestamp_col, kind="mergesort").reset_index(drop=True)
 
     tmp_path = path.with_suffix(path.suffix + ".sorted.tmp")
-    df.to_csv(tmp_path, index=False)
+    # Write timestamps back in the original format expected by the loader.
+    df.to_csv(tmp_path, index=False, date_format=TIMESTAMP_FORMAT)
     tmp_path.replace(path)
     print(f"[done] sorted {path} by {timestamp_col}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Sort IBM AML transaction CSV files by Timestamp."
+        description="Sort stream CSV files by Timestamp."
     )
     parser.add_argument(
         "--data-dir",
         default="data",
-        help="Directory containing IBM AML *_Trans.csv files.",
+        help="Directory containing *_Trans.csv stream files.",
     )
     parser.add_argument(
         "--files",
@@ -67,7 +71,7 @@ def parse_args():
     parser.add_argument(
         "--timestamp-col",
         default="Timestamp",
-        help="Timestamp column name in the original IBM AML files.",
+        help="Timestamp column name in the original stream files.",
     )
     return parser.parse_args()
 

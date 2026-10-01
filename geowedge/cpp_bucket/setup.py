@@ -35,7 +35,7 @@ setup(
     name="wedge_bucket_cpp",
     version="0.1.0",
     description="C++17 wedge log-bucket search — pybind11 extension for "
-                "streaming AML feasibility detection.",
+                "streaming package-existence queries.",
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

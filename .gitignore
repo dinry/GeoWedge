@@ -1,0 +1,19 @@
+# Compiled C++ extensions and build directories
+build/
+*.so
+*.o
+*.pyd
+
+# Python cache
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Datasets (download separately; see README)
+data/*.csv
+
+# Experiment outputs
+outputs/
+outputs_baselines/

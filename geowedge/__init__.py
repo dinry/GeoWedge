@@ -1,1 +1,1 @@
-"""Reviewer-facing GeoWedge implementation package."""
+"""GeoWedge implementation package."""

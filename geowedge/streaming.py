@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Shared streaming-detection plumbing for GeoWedge and the baselines.
+"""Shared streaming query-processing plumbing for GeoWedge and the baselines.
 
-Pipeline (mirrors IIODet.py's filter-then-search structure, but replaces the
-beam search stage with one of the four icde frontier_search variants):
+Pipeline (GeoWedge's prune-then-search structure; the search stage is one of
+the frontier_search variants):
 
     for each transaction e arriving in time order:
         1. update sliding window for both endpoints (acc, opp)
         2. for each anchor view (acc-side, opp-side):
              a. fetch (raw_in_list, raw_out_list)
              b. apply Properties 1-5 filtering -> (pruned_in, pruned_out)
-             c. if filtering kills the candidate => predict 0
-             d. otherwise call the chosen icde technique
+             c. if filtering empties the query instance => answer 0
+             d. otherwise call the chosen frontier-search technique
         3. record per-transaction wall-clock time
         4. push e into the sliding window
 
@@ -42,14 +42,11 @@ from state_search import Txn, State
 # -----------------------------------------------------------------------------
 @dataclass
 class Config:
-    """Detection-only parameters for the icde frontier-search pipeline.
-
-    No RL / beam-search knobs (lr, entropy_coef, batch_size, beam_size, ...)
-    — those only made sense for the old beam-search Stage 2 and are dropped.
+    """Query parameters for the GeoWedge frontier-search pipeline.
 
     Necessary knobs:
-        - theta   (min_in_sum)   : minimum incoming subset sum to call an anomaly
-        - epsilon (ratio_high)   : residual-ratio tolerance, anomaly iff |r| <= eps
+        - theta   (min_in_sum)   : minimum aggregate amount of the incoming package
+        - epsilon (ratio_high)   : maximum relative imbalance, feasible iff |r| <= eps
         - Delta   (window_days)  : sliding window length, 0.1 day for LI-Small
         - max_candidates         : perf safeguard on candidates per anchor
 
@@ -69,23 +66,26 @@ class Config:
 
     # Cascade ablation switch. When False, the wedge-bucket fallback inside
     # WedgeBucket-Cascade is skipped — only the Phase-1 greedy walk decides.
-    # Used by ablation_cascade/ to quantify how many alerts the bucket tier
-    # rescues. Default True keeps the published algorithm behaviour.
+    # Measures how many positive answers the bucket tier contributes.
+    # Default True keeps the full algorithm.
     bucket_enabled: bool = True
 
 
 # -----------------------------------------------------------------------------
-# Section 4.2 Property-based filtering
+# Section 4.2 PointPrune: bound-based pruning
 # -----------------------------------------------------------------------------
-def check_rules_anchor_stream(in_list: List[float], out_list: List[float],
-                               anchor_side: str, anchor_val: float,
-                               cfg: Config,
-                               sum_in: Optional[float] = None,
-                               sum_out: Optional[float] = None):
-    """Property-based filter (P1..P5).
+def point_prune(in_list: List[float], out_list: List[float],
+                anchor_side: str, anchor_val: float,
+                cfg: Config,
+                sum_in: Optional[float] = None,
+                sum_out: Optional[float] = None):
+    """PointPrune (Algorithm 2): property-based pruning with P1..P5.
+
+    `instance_prune` applies the instance-level checks P1-P3; the loop below
+    removes tuples with P4/P5 and repeats until no tuple is removed.
 
     The caller can pass `sum_in` and `sum_out` (running totals maintained by
-    `StreamDetector`) to avoid an O(W) `sum(...)` recomputation on every call.
+    `StreamQuery`) to avoid an O(W) `sum(...)` recomputation on every call.
     These are recomputed internally once any P4/P5 pruning iteration shrinks
     the lists.
     """
@@ -96,7 +96,7 @@ def check_rules_anchor_stream(in_list: List[float], out_list: List[float],
 
     one_plus_eps = 1.0 + cfg.ratio_high
 
-    def rule1_4(sum_in_l: float, sum_out_l: float):
+    def instance_prune(sum_in_l: float, sum_out_l: float):
         if anchor_side == "out":
             if len(in_list) == 0: return 0 #P1
             if sum_out_l + anchor_val < (1 - cfg.ratio_high) * cfg.min_in_sum: return 0 #P1
@@ -115,7 +115,7 @@ def check_rules_anchor_stream(in_list: List[float], out_list: List[float],
             if min(out_list) > one_plus_eps * (sum_in_l + anchor_val): return 0 #P3
         return -1
 
-    flag = rule1_4(sum_in, sum_out)
+    flag = instance_prune(sum_in, sum_out)
     if flag == 0:
         return 0, in_list, out_list
 
@@ -141,7 +141,7 @@ def check_rules_anchor_stream(in_list: List[float], out_list: List[float],
             sum_out = sum(out_list)
             changed = True
 
-        flag = rule1_4(sum_in, sum_out)
+        flag = instance_prune(sum_in, sum_out)
         if flag == 0:
             return 0, in_list, out_list
 
@@ -156,13 +156,13 @@ def _empty_window():
     return {"in": deque(), "out": deque()}
 
 
-class StreamDetector:
+class StreamQuery:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.window = timedelta(days=cfg.window_days)
         self.data = defaultdict(_empty_window)
         # Running sums maintained incrementally — avoids the O(W) sum() in
-        # check_rules_anchor_stream / property-filter for every anchor.
+        # point_prune / property-filter for every anchor.
         self.sum_in: defaultdict = defaultdict(float)
         self.sum_out: defaultdict = defaultdict(float)
 
@@ -186,7 +186,7 @@ class StreamDetector:
 
 
 # -----------------------------------------------------------------------------
-# IIODet -> icde Txn list adapter
+# Window lists -> Txn list adapter
 # -----------------------------------------------------------------------------
 def to_txns(in_list: List[float], out_list: List[float],
             anchor_amt: float, anchor_dir: str,
@@ -264,10 +264,10 @@ def to_txns_hybrid(in_list: List[float], out_list: List[float],
 
     Motivation
     ----------
-    `to_txns_balanced` (top-K by amount per side) misses any valid IIO
-    subset whose members are not among the K largest. For triggers where
-    the matching subset consists of MEDIUM-sized candidates near the
-    trigger amount (very common when the anomaly is a "mirror" of the
+    `to_txns_balanced` (top-K by amount per side) misses any feasible
+    package pair whose members are not among the K largest. For triggers
+    where the matching package consists of MEDIUM-sized candidates near the
+    trigger amount (very common when the pass-through flow "mirrors" the
     trigger), pure top-K-by-amount has zero chance of finding them.
 
     The hybrid version splits the per-side budget in half:
@@ -317,16 +317,16 @@ def to_txns_hybrid(in_list: List[float], out_list: List[float],
 
 
 # -----------------------------------------------------------------------------
-# LI-Small loader
+# Stream loader
 # -----------------------------------------------------------------------------
-DEFAULT_LI_SMALL_PATH = "data/LI-Small_Trans.csv"
-OUT_FLAG = "\u51fa"
+DEFAULT_STREAM_PATH = "data/LI-Small_Trans.csv"
+OUT_FLAG = "out"
 
 
-def load_li_small_dataframe(path: str = DEFAULT_LI_SMALL_PATH,
-                             nrows: Optional[int] = None,
-                             skip_rows: int = 0) -> pd.DataFrame:
-    """Memory-efficient loader: keep only the 5 columns we use, dtype-tight.
+def load_stream_dataframe(path: str = DEFAULT_STREAM_PATH,
+                          nrows: Optional[int] = None,
+                          skip_rows: int = 0) -> pd.DataFrame:
+    """Memory-efficient loader: keep only the 4 columns we use, dtype-tight.
 
     Parameters
     ----------
@@ -341,13 +341,11 @@ def load_li_small_dataframe(path: str = DEFAULT_LI_SMALL_PATH,
     """
     read_kwargs = dict(
         nrows=nrows,
-        usecols=["Account", "Timestamp", "Amount Paid",
-                 "Account.1", "Is Laundering"],
+        usecols=["Account", "Timestamp", "Amount Paid", "Account.1"],
         dtype={
             "Account": "category",
             "Account.1": "category",
             "Amount Paid": "float32",
-            "Is Laundering": "uint8",
         },
     )
     if skip_rows > 0:
@@ -355,11 +353,11 @@ def load_li_small_dataframe(path: str = DEFAULT_LI_SMALL_PATH,
         # header at file row 0. Using range() is faster than a callable.
         read_kwargs["skiprows"] = range(1, skip_rows + 1)
     df = pd.read_csv(path, **read_kwargs)
-    df["loan_flag"] = OUT_FLAG
-    df = df[["Account", "Timestamp", "loan_flag",
-             "Amount Paid", "Account.1", "Is Laundering"]]
-    df.columns = ["account_num", "trans_date", "loan_flag",
-                  "trans_amount", "opposite_account_num", "label"]
+    df["direction_flag"] = OUT_FLAG
+    df = df[["Account", "Timestamp", "direction_flag",
+             "Amount Paid", "Account.1"]]
+    df.columns = ["account_num", "trans_date", "direction_flag",
+                  "trans_amount", "opposite_account_num"]
     df["trans_date"] = pd.to_datetime(df["trans_date"], format="%Y/%m/%d %H:%M")
     # Sort by time; convert account categories to plain strings only when
     # consumed in the loop (saves memory while sorting).
@@ -373,7 +371,7 @@ def load_li_small_dataframe(path: str = DEFAULT_LI_SMALL_PATH,
 @dataclass
 class CheckpointState:
     next_idx: int = 0
-    detector: StreamDetector = None
+    stream_query: StreamQuery = None
     n_stage2_calls: int = 0
     n_total_anchor_cases: int = 0
     n_pred_positives: int = 0
@@ -421,9 +419,9 @@ def _write_progress(out_dir: Path, technique: str,
 
 
 # -----------------------------------------------------------------------------
-# Resumable streaming detection loop
+# Resumable streaming query loop
 # -----------------------------------------------------------------------------
-def detect_stream(df: pd.DataFrame,
+def query_stream(df: pd.DataFrame,
                   cfg: Config,
                   technique_fn: Callable,
                   technique_name: str,
@@ -466,14 +464,14 @@ def detect_stream(df: pd.DataFrame,
                     pass
 
     ckpt = _load_checkpoint(state_path)
-    if ckpt is None or ckpt.detector is None:
-        ckpt = CheckpointState(detector=StreamDetector(cfg))
+    if ckpt is None or ckpt.stream_query is None:
+        ckpt = CheckpointState(stream_query=StreamQuery(cfg))
 
     if ckpt.done:
         print(f"[{technique_name}] already done; rows={ckpt.next_idx}")
         return _make_summary(technique_name, cfg, ckpt, len(df))
 
-    detector = ckpt.detector
+    stream_query = ckpt.stream_query
     n_total = len(df)
 
     # Open append-mode streams for per-tx timings (binary, 8 bytes/double) and
@@ -492,7 +490,7 @@ def detect_stream(df: pd.DataFrame,
     acc_arr    = df["account_num"].astype(str).values
     opp_arr    = df["opposite_account_num"].astype(str).values
     amt_arr    = df["trans_amount"].values
-    flag_arr   = df["loan_flag"].values
+    flag_arr   = df["direction_flag"].values
     try:
         for idx in range(ckpt.next_idx, n_total):
             t = ts_arr[idx]
@@ -501,8 +499,8 @@ def detect_stream(df: pd.DataFrame,
             amt = float(amt_arr[idx])
             flag = flag_arr[idx]
             t_tx0 = time.time()
-            detector.update_window(acc, t)
-            detector.update_window(opp, t)
+            stream_query.update_window(acc, t)
+            stream_query.update_window(opp, t)
 
             anchors = (
                 [(acc, "out"), (opp, "in")]
@@ -516,9 +514,9 @@ def detect_stream(df: pd.DataFrame,
 
             for k, (account, anchor_type) in enumerate(anchors):
                 ckpt.n_total_anchor_cases += 1
-                raw_in = [v for _, v in detector.data[account]["in"]]
-                raw_out = [v for _, v in detector.data[account]["out"]]
-                rf, pi, po = check_rules_anchor_stream(
+                raw_in = [v for _, v in stream_query.data[account]["in"]]
+                raw_out = [v for _, v in stream_query.data[account]["out"]]
+                rf, pi, po = point_prune(
                     raw_in, raw_out, anchor_type, amt, cfg,
                 )
                 rule_flags[k] = rf
@@ -548,13 +546,13 @@ def detect_stream(df: pd.DataFrame,
             ckpt.next_idx = idx + 1
             ckpt.cumulative_wallclock += dt
 
-            # Push trigger into the sliding window AFTER detection.
+            # Push trigger into the sliding window AFTER query evaluation.
             if flag == OUT_FLAG:
-                detector.add_tx(acc, "out", t, amt)
-                detector.add_tx(opp, "in", t, amt)
+                stream_query.add_tx(acc, "out", t, amt)
+                stream_query.add_tx(opp, "in", t, amt)
             else:
-                detector.add_tx(acc, "in", t, amt)
-                detector.add_tx(opp, "out", t, amt)
+                stream_query.add_tx(acc, "in", t, amt)
+                stream_query.add_tx(opp, "out", t, amt)
 
             # ---- periodic checkpoint + progress ------------------------------
             if (idx + 1) % checkpoint_every == 0:
